@@ -45,30 +45,27 @@ class MovieController extends Controller
     }
 
     // Hàm lấy các phim liên quan
-    private function getRelatedJobs($filmId, $filmSimilarityMatrix, $userFilmMatrix)
+    private function getRelatedFilms($filmId, $filmSimilarityMatrix, $userFilmMatrix)
     {
         if (!isset($filmSimilarityMatrix[$filmId])) {
             return [];
         }
-
         arsort($filmSimilarityMatrix[$filmId]); // Sắp xếp theo thứ tự giảm dần của độ tương đồng
-        $topRelatedJobs = array_slice($filmSimilarityMatrix[$filmId], 0, 6, true); // Lấy 6 phim liên quan nhất
+        $topRelatedFilms = array_slice($filmSimilarityMatrix[$filmId], 0, 6, true); // Lấy 6 phim liên quan nhất
 
-        $relatedJobs = [];
-        foreach ($topRelatedJobs as $relatedJobId => $similarity) {
+        $relatedFilms = [];
+        foreach ($topRelatedFilms as $relatedFilmId => $similarity) {
             // Lọc các phim liên quan dựa trên mức độ tương đồng và đánh giá của người dùng
             foreach ($userFilmMatrix as $userId => $ratings) {
-                if ($ratings[$relatedJobId] > 0) { // Nếu người dùng đã đánh giá phim liên quan
-                    $relatedJobs[$relatedJobId] = $relatedJobId;
+                if ($ratings[$relatedFilmId] > 0) { // Nếu người dùng đã đánh giá phim liên quan
+                    $relatedFilms[$relatedFilmId] = $relatedFilmId;
                     break;
                 }
             }
         }
 
-        return array_keys($relatedJobs);
+        return array_keys($relatedFilms);
     }
-
-
 
     public function show(Film $film)
     {
@@ -111,14 +108,17 @@ class MovieController extends Controller
             foreach ($films as $film2) {
                 if ($film1->id != $film2->id) {
                     $vec1 = array_column($userFilmMatrix, $film1->id);
+
                     $vec2 = array_column($userFilmMatrix, $film2->id);
+
                     $filmSimilarityMatrix[$film1->id][$film2->id] = $this->cosineSimilarity($vec1, $vec2);
                 }
             }
         }
+        //dd($filmSimilarityMatrix[20][22]);
 
         // Lấy các phim liên quan
-        $relatedFilmIds = $this->getRelatedJobs($film->id, $filmSimilarityMatrix, $userFilmMatrix);
+        $relatedFilmIds = $this->getRelatedFilms($film->id, $filmSimilarityMatrix, $userFilmMatrix);
         $relatedFilms = !empty($relatedFilmIds) ? Film::whereIn('id', $relatedFilmIds)->get() : collect();
 
         return view('movies.show', compact('film', 'reviews', 'relatedFilms', 'countViews'));

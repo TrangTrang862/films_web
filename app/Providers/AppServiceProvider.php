@@ -28,7 +28,7 @@ class AppServiceProvider extends ServiceProvider
         //
         Schema::defaultStringLength(191);
 
-        $categoryFilms = Category::with('films')->get();
-        view()->share('categoryFilms', $categoryFilms);
+        $headerCategoryFilms = Category::with('films')->get();
+        view()->share('headerCategoryFilms', $headerCategoryFilms);
     }
 }
