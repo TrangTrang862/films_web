@@ -9,198 +9,187 @@ use App\FilmClickHistory;
 use App\FilmSearchHistory;
 use App\Favorite;
 use App\Message;
+use App\Rating;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Rubix\ML\Regressors\KNNRegressor;
 use Rubix\ML\Datasets\Labeled;
 use Rubix\ML\Datasets\Unlabeled;
+use Rubix\ML\Kernels\Distance\Euclidean;
 
 class HomeController extends Controller
 {
-    // Phương thức lấy gợi ý phim cho người dùng
     public function getRecommendationsForUser($userId)
     {
-        // Kiểm tra nếu người dùng chưa đăng nhập
         if (is_null($userId)) {
             // Nếu người dùng chưa đăng nhập, lấy ngẫu nhiên 10 phim
-            $recommendations = Film::inRandomOrder()->take(10)->get();
-        } else {
-            // Lấy lịch sử tương tác của người dùng (click, tìm kiếm, yêu thích)
-            $clickHistory = FilmClickHistory::where('user_id', $userId)->get();
-            $searchHistory = FilmSearchHistory::where('user_id', $userId)->get();
-            $favorites = Favorite::where('user_id', $userId)->get();
-
-            // Kiểm tra nếu người dùng chưa tương tác với bất kỳ phim nào
-            if ($clickHistory->isEmpty() && $searchHistory->isEmpty() && $favorites->isEmpty()) {
-                // Nếu người dùng chưa tương tác, lấy ngẫu nhiên 10 phim
-                $recommendations = Film::inRandomOrder()->take(10)->get();
-            } else {
-                // Nếu người dùng đã tương tác, lấy danh sách phim mà người dùng đã tương tác
-                $films = $this->getFilmsFromUserInteraction($clickHistory, $searchHistory, $favorites);
-
-                // Chuẩn bị dữ liệu cho mô hình (mã hóa các thuộc tính, tính năng của phim)
-                $data = $this->prepareDataForModel($films);
-
-                // Xây dựng mô hình khuyến nghị (KNN)
-                $model = $this->buildModel();
-
-                // Tạo gợi ý phim dựa trên mô hình
-                $recommendations = $this->getFilmRecommendations($model, $data, $films);
-            }
+            return Film::inRandomOrder()->take(10)->get();
         }
 
-        // Trả về kết quả gợi ý phim
-        return $recommendations;
+        // Lấy dữ liệu đánh giá của tất cả người dùng
+        $ratings = $this->getUserFilmRatings(); // Ma trận đánh giá: [user_id][film_id] => rating
+        // Tạo dataset từ ma trận đánh giá
+        [$data, $labels, $filmIds] = $this->trainingRS($ratings, $userId);
+        // Hàm tính khoảng cách Euclidean giữa 2 mảng
+        function euclideanDistance($vector1, $vector2)
+        {
+            $sum = 0;
+            // Tính tổng bình phương của sự chênh lệch
+            for ($i = 0; $i < count($vector1); $i++) {
+                $sum += pow($vector1[$i] - $vector2[$i], 2);
+            }
+            // Trả về căn bậc hai của tổng
+            return sqrt($sum);
+        }
+
+        // Tính khoảng cách Euclidean giữa từng phần tử trong mảng data và label
+        $distances = [];
+        foreach ($data as $index => $dataPoint) {
+            $distance = euclideanDistance($dataPoint, $labels);
+            $distances[] = ['index' => $index, 'distance' => $distance];
+        }
+
+        // Sắp xếp các khoảng cách theo thứ tự từ thấp đến cao (khoảng cách nhỏ nhất ở đầu)
+        usort($distances, fn($a, $b) => $a['distance'] <=> $b['distance']);
+        //dd($distances);
+        $nearestUsers = array_slice($distances, 0, 2);
+        //dd($nearestUsers);
+        // Lấy danh sách các phim chưa được đánh giá
+        $userRatings = $ratings[$userId] ?? [];
+        $unratedFilms = array_filter($userRatings, fn($rating) => $rating === 0);
+
+        // Dự đoán điểm đánh giá cho các phim chưa đánh giá
+        $predictedRatings = [];
+        foreach (array_keys($unratedFilms) as $filmId) {
+            $totalRating = 0;
+            $totalUsers = 0;
+
+            // Duyệt qua các người dùng gần nhất để lấy điểm đánh giá
+            foreach ($nearestUsers as $user) {
+                $nearestUserIndex = $user['index'];
+                $nearestUserRatings = $data[$nearestUserIndex]; // Đánh giá của người dùng gần nhất
+
+                // Nếu người dùng gần nhất đã đánh giá phim này, cộng vào tổng
+                if (isset($nearestUserRatings[$filmId]) && $nearestUserRatings[$filmId] > 0) {
+                    $totalRating += $nearestUserRatings[$filmId];
+                    $totalUsers++;
+                    //dd($totalRating);
+                }
+            }
+            // Xử lý nếu không có đánh giá từ người dùng gần nhất
+            if ($totalUsers === 0) {
+                // Lấy điểm trung bình toàn bộ người dùng cho phim này
+                $totalRating = array_sum(array_column($ratings, $filmId)) ?? 0;
+                $totalUsers = count(array_filter(array_column($ratings, $filmId), fn($rating) => $rating > 0));
+            }
+
+
+            // Tính trung bình cộng nếu có ít nhất một người dùng đã đánh giá
+            $predictedRating = $totalUsers > 0 ? $totalRating / $totalUsers : 0;
+
+            // Điền điểm dự đoán vào danh sách
+            $predictedRatings[$filmId] = $predictedRating;
+        }
+        arsort($predictedRatings);
+
+
+
+
+        // Lấy danh sách ID của 3 phim đầu tiên
+        $topFilmIds = array_slice(array_keys($predictedRatings), 0, 3);
+        // Truy vấn phim theo thứ tự của $topFilmIds
+        $recommendedFilms = Film::whereIn('id', $topFilmIds)
+            ->orderByRaw('FIELD(id, ' . implode(',', $topFilmIds) . ')')
+            ->get();
+
+        // Kiểm tra kết quả
+        //dd($recommendedFilms);
+        return $recommendedFilms;
     }
 
-    // Lấy danh sách phim mà người dùng đã tương tác (click, tìm kiếm, yêu thích)
-    private function getFilmsFromUserInteraction($clickHistory, $searchHistory, $favorites)
+
+    // Lấy tất cả dữ liệu đánh giá của người dùng từ bảng ratings
+    private function getUserFilmRatings()
     {
-        // Lấy tất cả các phim mà người dùng đã tương tác (click, tìm kiếm, yêu thích)
-        $filmIds = $clickHistory->pluck('film_id')  // Lấy ID phim từ lịch sử click
-            ->merge($favorites->pluck('film_id'))  // Lấy ID phim từ danh sách yêu thích
-            ->unique();  // Loại bỏ trùng lặp
+        // Lấy tất cả các đánh giá của người dùng và phim từ bảng ratings
+        $ratings = DB::table('ratings')
+            ->select('user_id', 'film_id', 'rating')
+            ->get();
 
-        // Lấy danh sách phim từ lịch sử tìm kiếm (so sánh theo tên phim)
-        $searchFilmNames = $searchHistory->pluck('key_search')->unique();  // Lấy các từ khóa tìm kiếm (tên phim)
+        // Lấy tất cả các phim (có thể lấy theo ID hoặc tên, tùy theo yêu cầu)
+        $filmIds = Film::orderBy('id', 'asc')->pluck('id')->toArray(); // Lấy tất cả ID phim theo thứ tự giảm dần
 
-        // Tìm các phim có tên trùng với từ khóa tìm kiếm
-        $filmsFromSearch = Film::whereIn('name', $searchFilmNames)->pluck('id');  // Tìm phim theo tên
 
-        // Kết hợp các ID phim từ lịch sử click, yêu thích và tìm kiếm
-        $filmIds = $filmIds->merge($filmsFromSearch)->unique();  // Hợp nhất các ID phim từ ba nguồn
+        // Khởi tạo mảng để lưu ma trận đánh giá
+        $matrix = [];
 
-        // Lấy phim từ cơ sở dữ liệu dựa trên ID phim
-        return Film::whereIn('id', $filmIds)->get();
+        // Duyệt qua tất cả các đánh giá để tạo ma trận [user_id][film_id] => rating
+        foreach ($ratings as $rating) {
+            $matrix[$rating->user_id][$rating->film_id] = $rating->rating;
+        }
+
+        // Đảm bảo rằng mỗi người dùng có đầy đủ vector đánh giá cho tất cả các phim
+        foreach ($matrix as $userId => $userRatings) {
+            // Tạo vector đánh giá cho mỗi người dùng, nếu chưa đánh giá phim nào thì gán giá trị 0
+            foreach ($filmIds as $filmId) {
+                if (!isset($userRatings[$filmId])) {
+                    $matrix[$userId][$filmId] = 0; // Gán 0 cho các phim chưa đánh giá
+                }
+            }
+            ksort($matrix[$userId]);
+        }
+
+        return $matrix;
     }
 
 
-    // Chuẩn bị dữ liệu cho mô hình khuyến nghị (bao gồm các thuộc tính như thể loại và diễn viên)
-    private function prepareDataForModel($films)
+
+
+    private function trainingRS($ratings, $userId)
     {
         $data = [];
         $labels = [];
+        $filmIds = [];
 
-        // Tạo một danh sách tất cả các thể loại và diễn viên độc nhất
-        $allCategories = Category::all()->pluck('name')->toArray();
-        $allActors = Actor::all()->pluck('name')->toArray();
-
-        // Tạo các chỉ số duy nhất cho thể loại và diễn viên
-        $categoryIndex = array_flip($allCategories); // Mã hóa thể loại thành chỉ số
-        $actorIndex = array_flip($allActors); // Mã hóa diễn viên thành chỉ số
-
-        foreach ($films as $film) {
-            // Lấy các thể loại và diễn viên của phim
-            $categories = $film->categories()->pluck('name')->toArray();
-            $actors = $film->actors()->pluck('name')->toArray();
-
-            // Chuyển thể loại và diễn viên thành các chỉ số
-            $categoryVector = array_map(function ($category) use ($categoryIndex) {
-                return $categoryIndex[$category] ?? -1; // -1 nếu thể loại không tồn tại
-            }, $categories);
-
-            $actorVector = array_map(function ($actor) use ($actorIndex) {
-                return $actorIndex[$actor] ?? -1; // -1 nếu diễn viên không tồn tại
-            }, $actors);
-
-            // Đảm bảo rằng mỗi bộ phim có một vector đồng nhất có đúng 20 đặc trưng
-            $fixedCategoryCount = 10; // Ví dụ: 10 thể loại
-            $fixedActorCount = 10; // Ví dụ: 10 diễn viên
-
-            // Đệm (padding) hoặc cắt (truncate) các vector thể loại và diễn viên
-            $categoryVector = array_pad($categoryVector, $fixedCategoryCount, -1); // Đệm với -1
-            $actorVector = array_pad($actorVector, $fixedActorCount, -1); // Đệm với -1
-
-            // Kết hợp tất cả tính năng lại thành một vector duy nhất có đúng 20 đặc trưng
-            $features = array_merge($categoryVector, $actorVector);
-
-            // Kiểm tra và đảm bảo tổng số tính năng là 20
-            if (count($features) !== 20) {
-                // Nếu tổng số tính năng không phải là 20, bạn có thể quyết định thêm giá trị mặc định hoặc xử lý khác
-                $features = array_pad($features, 20, -1); // Đệm với -1 nếu cần
+        // Chuyển ma trận đánh giá thành dataset
+        foreach ($ratings as $uid => $userRatings) {
+            if ($uid == $userId) {
+                continue; // Bỏ qua người dùng hiện tại
             }
 
-            // Sử dụng ID phim làm nhãn
-            $labels[] = $film->id;
-
-            // Lưu các tính năng của phim
-            $data[] = $features;
+            // Vector đánh giá của người dùng (thay null bằng 0)
+            $data[] = $this->getUserRatingsVector($ratings, $uid);
+            //Vector nhãn (rating của phim cụ thể)
+            foreach ($userRatings as $filmId => $rating) {
+                if (!in_array($filmId, $filmIds)) {
+                    $filmIds[] = $filmId;
+                }
+                // if ($rating !== null) {
+                //     $labels[] = $rating;
+                // }
+            }
         }
-
-        // Kiểm tra lại số lượng mẫu và nhãn
-        if (count($data) !== count($labels)) {
-            throw new \Exception("Number of samples and labels must be equal. Found " . count($data) . " samples but " . count($labels) . " labels.");
-        }
-
-        return [$data, $labels];
+        $labels = $this->getUserRatingsVector($ratings, $userId);
+        return [$data, $labels, $filmIds];
     }
 
-
-    // Xây dựng mô hình KNN với K=5
-    private function buildModel()
+    // Tạo vector đánh giá của người dùng, sử dụng danh sách phim đầy đủ theo thứ tự
+    private function getUserRatingsVector($ratings, $userId)
     {
-        return new KNNRegressor(5);
-    }
+        // Lấy tất cả phim đã đánh giá của người dùng
+        $userRatings = $ratings[$userId] ?? [];
 
-    // Tạo gợi ý phim dựa trên mô hình KNN đã huấn luyện
-    private function getFilmRecommendations($model, $data, $films)
-    {
-        // Huấn luyện mô hình KNN với dữ liệu phim
-        list($data, $labels) = $data;
-        $dataset = new Labeled($data, $labels);  // Sử dụng Labeled thay vì Dataset
+        // Lấy danh sách tất cả các phim theo thứ tự cố định (theo ID)
+        $allFilmIds = Film::orderBy('id', 'asc')->pluck('id')->toArray(); // Lấy tất cả các phim theo thứ tự cố định
 
-        // Đảm bảo rằng các mẫu có số chiều chính xác
-        if (count($data[0]) !== 20) {
-            throw new \Exception("Each sample must have exactly 20 features. Found " . count($data[0]) . " features.");
+        $vector = [];
+        foreach ($allFilmIds as $filmId) {
+            // Nếu người dùng đã đánh giá thì lấy rating, nếu không thì gán 0
+            $vector[] = $userRatings[$filmId] ?? 0;
         }
 
-        $model->train($dataset);
-
-        $recommendations = [];
-        $clickedFilmIds = $films->pluck('id')->toArray(); // Lấy danh sách ID phim mà người dùng đã tương tác
-
-        foreach ($films as $film) {
-            // Lấy các tính năng của phim hiện tại (thể loại và diễn viên)
-            $features = array_merge($film->categories()->pluck('name')->toArray(), $film->actors()->pluck('name')->toArray());
-
-            // Lấy các phim có cùng thể loại hoặc diễn viên
-            $similarFilms = Film::whereHas('categories', function ($query) use ($film) {
-                $query->whereIn('name', $film->categories()->pluck('name')->toArray());
-            })->orWhereHas('actors', function ($query) use ($film) {
-                $query->whereIn('name', $film->actors()->pluck('name')->toArray());
-            })->get();
-
-            // Mã hóa các tính năng của phim để sử dụng trong mô hình
-            $encodedFeatures = array_map(function ($feature) use ($features) {
-                return array_search($feature, array_unique($features));
-            }, $features);
-
-            // Đảm bảo rằng có 20 đặc trưng
-            $encodedFeatures = array_pad($encodedFeatures, 20, -1);  // Đệm nếu cần
-
-            // Dự đoán các phim tương tự dựa trên mô hình KNN đã huấn luyện
-            $predictions = $model->predict(new Unlabeled([$encodedFeatures]));
-
-            // Thêm các phim được dự đoán vào danh sách gợi ý
-            foreach ($predictions as $prediction) {
-                $recommendedFilm = Film::find($prediction);
-                if ($recommendedFilm && !in_array($recommendedFilm->id, $clickedFilmIds)) {
-                    $recommendations[] = $recommendedFilm;
-                }
-            }
-
-            // Thêm các phim có cùng thể loại hoặc diễn viên vào danh sách gợi ý, nếu phim đó chưa được người dùng click hoặc yêu thích
-            foreach ($similarFilms as $similarFilm) {
-                if (!in_array($similarFilm->id, $clickedFilmIds)) {
-                    $recommendations[] = $similarFilm;
-                }
-            }
-        }
-
-        // Loại bỏ các phim trùng lặp trong danh sách gợi ý
-        $recommendations = array_unique($recommendations, SORT_REGULAR);
-
-        return $recommendations;
+        return $vector;
     }
 
 
