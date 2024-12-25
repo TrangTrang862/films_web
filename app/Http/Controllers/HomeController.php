@@ -31,30 +31,21 @@ class HomeController extends Controller
         $ratings = $this->getUserFilmRatings(); // Ma trận đánh giá: [user_id][film_id] => rating
         // Tạo dataset từ ma trận đánh giá
         [$data, $labels, $filmIds] = $this->trainingRS($ratings, $userId);
-        // Hàm tính khoảng cách Euclidean giữa 2 mảng
-        function euclideanDistance($vector1, $vector2)
-        {
-            $sum = 0;
-            // Tính tổng bình phương của sự chênh lệch
-            for ($i = 0; $i < count($vector1); $i++) {
-                $sum += pow($vector1[$i] - $vector2[$i], 2);
-            }
-            // Trả về căn bậc hai của tổng
-            return sqrt($sum);
-        }
 
         // Tính khoảng cách Euclidean giữa từng phần tử trong mảng data và label
         $distances = [];
         foreach ($data as $index => $dataPoint) {
-            $distance = euclideanDistance($dataPoint, $labels);
+            $distance = $this->euclideanDistance($dataPoint, $labels);
             $distances[] = ['index' => $index, 'distance' => $distance];
         }
 
         // Sắp xếp các khoảng cách theo thứ tự từ thấp đến cao (khoảng cách nhỏ nhất ở đầu)
         usort($distances, fn($a, $b) => $a['distance'] <=> $b['distance']);
-        //dd($distances);
+
+        // Lấy 2 người dùng gần nhất
         $nearestUsers = array_slice($distances, 0, 2);
         //dd($nearestUsers);
+
         // Lấy danh sách các phim chưa được đánh giá
         $userRatings = $ratings[$userId] ?? [];
         $unratedFilms = array_filter($userRatings, fn($rating) => $rating === 0);
@@ -70,43 +61,51 @@ class HomeController extends Controller
                 $nearestUserIndex = $user['index'];
                 $nearestUserRatings = $data[$nearestUserIndex]; // Đánh giá của người dùng gần nhất
 
+                // Lấy vị trí phim trong vector đánh giá
+                $filmIndex = array_search($filmId, $filmIds);
+
                 // Nếu người dùng gần nhất đã đánh giá phim này, cộng vào tổng
-                if (isset($nearestUserRatings[$filmId]) && $nearestUserRatings[$filmId] > 0) {
-                    $totalRating += $nearestUserRatings[$filmId];
+                if ($filmIndex !== false && isset($nearestUserRatings[$filmIndex]) && $nearestUserRatings[$filmIndex] > 0) {
+                    $totalRating += $nearestUserRatings[$filmIndex];
                     $totalUsers++;
-                    //dd($totalRating);
                 }
             }
-            // Xử lý nếu không có đánh giá từ người dùng gần nhất
-            if ($totalUsers === 0) {
-                // Lấy điểm trung bình toàn bộ người dùng cho phim này
-                $totalRating = array_sum(array_column($ratings, $filmId)) ?? 0;
-                $totalUsers = count(array_filter(array_column($ratings, $filmId), fn($rating) => $rating > 0));
-            }
 
+            // Nếu không có đánh giá từ người dùng gần nhất
+            // if ($totalUsers === 0) {
+            //     // Lấy điểm trung bình toàn bộ người dùng cho phim này
+            //     $totalRating = array_sum(array_column($ratings, $filmId)) ?? 0;
+            //     $totalUsers = count(array_filter(array_column($ratings, $filmId), fn($rating) => $rating > 0));
+            // }
 
-            // Tính trung bình cộng nếu có ít nhất một người dùng đã đánh giá
+            // Tính điểm trung bình
             $predictedRating = $totalUsers > 0 ? $totalRating / $totalUsers : 0;
-
-            // Điền điểm dự đoán vào danh sách
             $predictedRatings[$filmId] = $predictedRating;
         }
+        //dd($predictedRatings);
+        // Sắp xếp phim theo điểm đánh giá dự đoán
         arsort($predictedRatings);
-
-
-
-
+        //dd($predictedRatings);
         // Lấy danh sách ID của 3 phim đầu tiên
-        $topFilmIds = array_slice(array_keys($predictedRatings), 0, 3);
+        $topFilmIds = array_slice(array_keys($predictedRatings), 0, 5);
+
         // Truy vấn phim theo thứ tự của $topFilmIds
         $recommendedFilms = Film::whereIn('id', $topFilmIds)
             ->orderByRaw('FIELD(id, ' . implode(',', $topFilmIds) . ')')
             ->get();
 
-        // Kiểm tra kết quả
-        //dd($recommendedFilms);
         return $recommendedFilms;
     }
+
+    private function euclideanDistance($vector1, $vector2)
+    {
+        $sum = 0;
+        for ($i = 0; $i < count($vector1); $i++) {
+            $sum += pow($vector1[$i] - $vector2[$i], 2);
+        }
+        return sqrt($sum);
+    }
+
 
 
     // Lấy tất cả dữ liệu đánh giá của người dùng từ bảng ratings
